@@ -7,10 +7,10 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, Term, isleader)
 //   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
+// rf.GetState() (Term, isLeader)
+//   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -57,6 +58,17 @@ type logEntry struct {
 	command interface{}
 }
 
+//my definition on AppendEntryArgs
+type AppendEntryArgs struct {
+	Term   int
+	Leader int
+}
+
+type AppendEntryReply struct {
+	Term   int
+	Leader int
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -74,7 +86,8 @@ type Raft struct {
 	votedFor    int
 	logEntries  []logEntry
 
-	leader int
+	leader         int
+	timeOut4Leader bool
 }
 
 // return currentTerm and whether this server
@@ -84,10 +97,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	if rf.leader == rf.me {
 		isleader = true
 	}
 	term = rf.currentTerm
+	rf.mu.Unlock()
 
 	return term, isleader
 }
@@ -158,10 +173,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int
-	candidateID  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -170,8 +185,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -181,45 +196,58 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// Your code here (2A, 2B).
-	//update the current term if current term is old
-	if rf.currentTerm < args.term {
-		rf.currentTerm = args.term
+	//update the current Term if current Term is old
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
 
-	reply.term = rf.currentTerm
-	//candidate term is old, reject
-	if rf.currentTerm > args.term {
-		reply.voteGranted = false
+	reply.Term = rf.currentTerm
+	//candidate Term is old, reject
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
 		return
 	}
 	//has voted
 	if rf.votedFor != -1 {
 		//has voted for other candidate, reject
-		if rf.votedFor != args.candidateID {
-			reply.voteGranted = false
+		if rf.votedFor != args.CandidateID {
+			reply.VoteGranted = false
 		} else {
-			reply.voteGranted = true
+			reply.VoteGranted = true
 		}
 		return
 	} else { //has not voted, try to vote the candidate
 		lastLogIndex := len(rf.logEntries) - 1
 		//candidate log is old, reject
-		//compare the lastLogIndex rather than last applied, because some logs are committed
+		//compare the LastLogIndex rather than last applied, because some logs are committed
 		//but are not applied for the time being
-		if args.lastLogIndex < lastLogIndex {
-			reply.voteGranted = false
+		if args.LastLogIndex < lastLogIndex {
+			reply.VoteGranted = false
 			return
 		}
-		if args.lastLogTerm < rf.logEntries[lastLogIndex].term {
-			reply.voteGranted = false
+		if args.LastLogTerm < rf.logEntries[lastLogIndex].term {
+			reply.VoteGranted = false
 			return
 		}
 		//vote for candidate
-		rf.votedFor = args.candidateID
-		reply.voteGranted = true
+		rf.votedFor = args.CandidateID
+		reply.VoteGranted = true
+		rf.timeOut4Leader = false //reset timeout here???
 	}
 
+}
+
+func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
+	rf.mu.Lock()
+	if args.Term >= rf.currentTerm {
+		rf.timeOut4Leader = false
+		rf.leader = args.Leader
+		rf.currentTerm = args.Term
+	}
+	reply.Term = rf.currentTerm
+	reply.Leader = rf.leader
+	rf.mu.Unlock()
 }
 
 //
@@ -258,6 +286,13 @@ func (rf *Raft) sendRequestVote(
 	return ok
 }
 
+func (rf *Raft) sendAppendEntry(
+	server int, args *AppendEntryArgs, reply *AppendEntryReply,
+) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -269,7 +304,7 @@ func (rf *Raft) sendRequestVote(
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -303,6 +338,50 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) appendEntryTicker() {
+	for rf.killed() == false {
+		fmt.Printf("test log\n")
+		if rf.leader != rf.me {
+			break
+		}
+
+		replyChan := make(chan *AppendEntryReply)
+		f := func(peerIndex int, args *AppendEntryArgs) {
+			reply := AppendEntryReply{}
+			sendRes := rf.sendAppendEntry(peerIndex, args, &reply)
+			if !sendRes {
+				reply.Term = -1
+				reply.Leader = -1
+			}
+			replyChan <- &reply
+		}
+
+		args := AppendEntryArgs{Term: rf.currentTerm, Leader: rf.me}
+		for i := 0; i < len(rf.peers); i++ {
+			go f(i, &args)
+		}
+
+		for i := 0; i < len(rf.peers); i++ {
+			reply := <-replyChan
+			if reply.Term == -1 {
+				continue
+			}
+			rf.mu.Lock()
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.leader = reply.Leader
+			}
+			if reply.Term < rf.currentTerm || (reply.Term == rf.currentTerm && reply.Leader != rf.me) {
+				fmt.Printf("fatal error")
+			}
+			rf.mu.Unlock()
+		}
+
+		time.Sleep(time.Millisecond * 120)
+
+	}
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -311,27 +390,58 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		rf.mu.Lock()
+		rf.timeOut4Leader = true
+		rf.mu.Unlock()
+
 		timeout := time.Duration(400 + rand.Int()%10*100)
 		time.Sleep(time.Millisecond * timeout)
 
-		args := RequestVoteArgs{}
-		args.candidateID = rf.me
-		args.term = rf.currentTerm
-		args.lastLogIndex = len(rf.logEntries) - 1
-		args.lastLogTerm = rf.logEntries[len(rf.logEntries)-1].term
-		rf.votedFor = rf.me
+		rf.mu.Lock()
+		timeOut4Leader := rf.timeOut4Leader
+		rf.mu.Unlock()
 
-		replyChan := make(chan *RequestVoteReply)
-		f := func(peerIndex int, args *RequestVoteArgs) {
-			reply := RequestVoteReply{}
-			for !rf.sendRequestVote(peerIndex, args, &reply) {
+		if timeOut4Leader == true {
+			rf.mu.Lock()
+			args := RequestVoteArgs{}
+			args.CandidateID = rf.me
+			args.Term = rf.currentTerm
+			args.LastLogIndex = len(rf.logEntries) - 1
+			args.LastLogTerm = rf.logEntries[len(rf.logEntries)-1].term
+			rf.votedFor = rf.me
+			rf.mu.Unlock()
 
+			replyChan := make(chan *RequestVoteReply)
+			f := func(peerIndex int, args *RequestVoteArgs) {
+				reply := RequestVoteReply{}
+				sendRes := rf.sendRequestVote(peerIndex, args, &reply)
+				if !sendRes {
+					reply.Term = -1
+					reply.VoteGranted = false
+				}
+				replyChan <- &reply
 			}
-			replyChan <- &reply
-		}
+			//send vote request
+			for i := 0; i < len(rf.peers); i++ {
+				go f(i, &args)
+			}
+			//count the vote
+			voteNum := 0
+			for i := 0; i < len(rf.peers); i++ {
+				reply := <-replyChan
+				if reply.VoteGranted == true {
+					voteNum++
+				}
+			}
+			//become the leader
+			if voteNum > len(rf.peers) {
+				rf.mu.Lock()
+				rf.leader = rf.me
+				rf.currentTerm++
+				rf.mu.Unlock()
+				go rf.appendEntryTicker()
+			}
 
-		for i := 0; i < len(rf.peers); i++ {
-			go f(i, &args)
 		}
 
 	}
@@ -358,6 +468,10 @@ func Make(
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 1
+	initialTerm := logEntry{term: 0}
+	rf.logEntries = []logEntry{initialTerm}
+	rf.votedFor = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
