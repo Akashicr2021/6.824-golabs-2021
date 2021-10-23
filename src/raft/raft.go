@@ -197,9 +197,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	// Your code here (2A, 2B).
 	//update the current Term if current Term is old
-	if rf.currentTerm < args.Term {
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
+	if rf.currentTerm<args.Term{
+		rf.currentTerm=args.Term
+		rf.votedFor=-1
+		rf.leader=-1
 	}
 
 	reply.Term = rf.currentTerm
@@ -208,8 +209,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+	fmt.Printf("node %d: receive vote request from %d\n", rf.me,args.CandidateID)
 	//has voted
 	if rf.votedFor != -1 {
+		fmt.Printf("node %d: has voted to %d\n", rf.me,rf.votedFor)
 		//has voted for other candidate, reject
 		if rf.votedFor != args.CandidateID {
 			reply.VoteGranted = false
@@ -232,8 +235,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		//vote for candidate
 		rf.votedFor = args.CandidateID
-		reply.VoteGranted = true
 		rf.timeOut4Leader = false //reset timeout here???
+		reply.VoteGranted = true
 	}
 
 }
@@ -241,9 +244,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	if args.Term >= rf.currentTerm {
+		fmt.Printf("node %d: append entry from %d\n",rf.me, args.Leader)
+		rf.currentTerm = args.Term
 		rf.timeOut4Leader = false
 		rf.leader = args.Leader
-		rf.currentTerm = args.Term
+		rf.votedFor=-1
 	}
 	reply.Term = rf.currentTerm
 	reply.Leader = rf.leader
@@ -340,8 +345,11 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) appendEntryTicker() {
 	for rf.killed() == false {
-		fmt.Printf("test log\n")
-		if rf.leader != rf.me {
+		rf.mu.Lock()
+		leader:=rf.leader
+		me:=rf.me
+		rf.mu.Unlock()
+		if leader != me {
 			break
 		}
 
@@ -356,7 +364,11 @@ func (rf *Raft) appendEntryTicker() {
 			replyChan <- &reply
 		}
 
+		//conflict happen???
+		rf.mu.Lock()
 		args := AppendEntryArgs{Term: rf.currentTerm, Leader: rf.me}
+		rf.mu.Unlock()
+
 		for i := 0; i < len(rf.peers); i++ {
 			go f(i, &args)
 		}
@@ -370,6 +382,7 @@ func (rf *Raft) appendEntryTicker() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.leader = reply.Leader
+				rf.votedFor=-1
 			}
 			if reply.Term < rf.currentTerm || (reply.Term == rf.currentTerm && reply.Leader != rf.me) {
 				fmt.Printf("fatal error")
@@ -386,7 +399,6 @@ func (rf *Raft) appendEntryTicker() {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
@@ -394,7 +406,7 @@ func (rf *Raft) ticker() {
 		rf.timeOut4Leader = true
 		rf.mu.Unlock()
 
-		timeout := time.Duration(400 + rand.Int()%10*100)
+		timeout := time.Duration(400 + rand.Int()%5*100)
 		time.Sleep(time.Millisecond * timeout)
 
 		rf.mu.Lock()
@@ -403,12 +415,15 @@ func (rf *Raft) ticker() {
 
 		if timeOut4Leader == true {
 			rf.mu.Lock()
+			rf.currentTerm++
+			rf.votedFor = rf.me
+			rf.leader=-1
 			args := RequestVoteArgs{}
 			args.CandidateID = rf.me
 			args.Term = rf.currentTerm
 			args.LastLogIndex = len(rf.logEntries) - 1
 			args.LastLogTerm = rf.logEntries[len(rf.logEntries)-1].term
-			rf.votedFor = rf.me
+			fmt.Printf("node %d: timeout, start new election, term is %d\n",rf.me,rf.currentTerm)
 			rf.mu.Unlock()
 
 			replyChan := make(chan *RequestVoteReply)
@@ -419,6 +434,10 @@ func (rf *Raft) ticker() {
 					reply.Term = -1
 					reply.VoteGranted = false
 				}
+				if reply.VoteGranted{
+					fmt.Printf("node %d receive vote from %d\n",rf.me,peerIndex)
+				}
+
 				replyChan <- &reply
 			}
 			//send vote request
@@ -427,19 +446,33 @@ func (rf *Raft) ticker() {
 			}
 			//count the vote
 			voteNum := 0
+			notVoteNum:=0
 			for i := 0; i < len(rf.peers); i++ {
 				reply := <-replyChan
-				if reply.VoteGranted == true {
+				if reply.VoteGranted {
 					voteNum++
+				}else{
+					notVoteNum++
+				}
+				if voteNum > len(rf.peers)/2||notVoteNum > len(rf.peers)/2{
+					break
 				}
 			}
 			//become the leader
-			if voteNum > len(rf.peers) {
+			fmt.Printf("node %d: voted num is %d\n",rf.me,voteNum)
+			if voteNum > len(rf.peers)/2 {
+				isLeader:=false
 				rf.mu.Lock()
-				rf.leader = rf.me
-				rf.currentTerm++
+				if args.Term==rf.currentTerm&&rf.leader==-1{
+					fmt.Printf("%d become the term %d leader\n",rf.me,args.Term)
+					rf.leader = rf.me
+					isLeader=true
+				}
 				rf.mu.Unlock()
-				go rf.appendEntryTicker()
+				if isLeader{
+					go rf.appendEntryTicker()
+				}
+
 			}
 
 		}
@@ -472,6 +505,7 @@ func Make(
 	initialTerm := logEntry{term: 0}
 	rf.logEntries = []logEntry{initialTerm}
 	rf.votedFor = -1
+	rf.leader=-1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
