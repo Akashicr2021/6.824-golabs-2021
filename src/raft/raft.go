@@ -314,39 +314,44 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.ServerIndex = rf.me
 
 	//code to handle append entry
-	if len(args.LogEntries) > 0 {
-		//reject if the Term is old
-		reply.Success = false
-		if args.Term < rf.currentTerm {
-			log.Printf(
-				"node %d: reject append because old term, current term is %d but the entry term is %d",
-				rf.me, rf.currentTerm, args.Term,
-			)
-			return
-		}
-		//reject if pre info is wrong
-		if args.PreLogIndex >= len(rf.logEntries) {
-			log.Printf("node %d: reject append, preLogIndex is %d, len of log is %d",rf.me,args.PreLogIndex,len(rf.logEntries))
-			return
-		}
-		if rf.logEntries[args.PreLogIndex].Term != args.PreLogTerm {
-			log.Printf(
-				"node %d: reject append because mismatched term in pre log, current term is %d but the entry term is %d",
-				rf.me, rf.logEntries[args.PreLogIndex].Term, args.PreLogTerm,
-			)
-			return
-		}
-		//accept the append entry
-		reply.Success = true
-
-		rf.logEntries = append(rf.logEntries[0:args.PreLogIndex+1], args.LogEntries...)
-		rf.persist()
+	//reject if the Term is old
+	reply.Success = false
+	if args.Term < rf.currentTerm {
+		log.Printf(
+			"node %d: reject append because old term, current term is %d but the entry term is %d",
+			rf.me, rf.currentTerm, args.Term,
+		)
+		return
 	}
+	//reject if pre info is wrong
+	if args.PreLogIndex >= len(rf.logEntries) {
+		log.Printf("node %d: reject append, preLogIndex is %d, len of log is %d",rf.me,args.PreLogIndex,len(rf.logEntries))
+		return
+	}
+	if rf.logEntries[args.PreLogIndex].Term != args.PreLogTerm {
+		log.Printf(
+			"node %d: reject append because mismatched term in pre log, current term is %d but the entry term is %d",
+			rf.me, rf.logEntries[args.PreLogIndex].Term, args.PreLogTerm,
+		)
+		return
+	}
+	//accept the append entry
+	reply.Success = true
+
+	rf.logEntries = append(rf.logEntries[0:args.PreLogIndex+1], args.LogEntries...)
+	rf.commitEntriesUntilIndex(args.LeaderCommit)
+
+	rf.persist()
+
 }
 
 func (rf *Raft) CommitEntry(args *CommitEntryArgs, reply *CommitEntryReply){
-	index:=args.CommitIndex
 	rf.mu.Lock()
+	rf.commitEntriesUntilIndex(args.CommitIndex)
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) commitEntriesUntilIndex(index int){
 	for i:=rf.commitIndex+1;i<=index;i++{
 		msg:=ApplyMsg{}
 		msg.Command=rf.logEntries[i].Command
@@ -358,9 +363,6 @@ func (rf *Raft) CommitEntry(args *CommitEntryArgs, reply *CommitEntryReply){
 	if rf.commitIndex<index{
 		rf.commitIndex=index
 	}
-
-	rf.mu.Unlock()
-
 }
 
 //
@@ -474,6 +476,11 @@ func (rf *Raft) appendEntrySender(peerIndex int, args AppendEntryArgs, counter *
 	rf.mu.Lock()
 	args.PreLogIndex = rf.nextIndex[peerIndex] - 1
 	args.PreLogTerm = rf.logEntries[args.PreLogIndex].Term
+	args.LeaderCommit=rf.commitIndex
+
+	//tmpSlice:=append([]logEntry{},rf.logEntries[args.PreLogIndex+1:len(rf.logEntries)]...)
+	//args.LogEntries=append(tmpSlice,args.LogEntries...)
+	args.LogEntries=append([]logEntry{},rf.logEntries[args.PreLogIndex+1:len(rf.logEntries)]...)
 	rf.mu.Unlock()
 
 	reply := AppendEntryReply{}
@@ -497,12 +504,14 @@ func (rf *Raft) appendEntryReplyHandler(
 			next := args.PreLogIndex + len(args.LogEntries) + 1
 			if rf.nextIndex[serverIndex] < next {
 				rf.nextIndex[serverIndex] = next
+				logger.Printf("%d: next is %d",serverIndex,next)
 			}
 			counter.mu.Lock()
 			counter.count++
 			counter.votedServer=append(counter.votedServer,serverIndex)
 			if counter.count>len(rf.peers)/2{
 				index:=args.PreLogIndex+len(args.LogEntries)
+				logger.Printf("preIndex %d, len %d",args.PreLogIndex,len(args.LogEntries))
 				args:=CommitEntryArgs{CommitIndex: index}
 				reply:=CommitEntryReply{}
 				for i:=0;i<len(counter.votedServer);i++{
@@ -531,6 +540,7 @@ func (rf *Raft) appendEntryTicker() {
 		me := rf.me
 		args := AppendEntryArgs{Term: rf.currentTerm, Leader: rf.me}
 		args.LogEntries = make([]logEntry, 0)
+		rf.timeOut4Leader=false
 		rf.mu.Unlock()
 
 		if leader != me {
@@ -541,13 +551,19 @@ func (rf *Raft) appendEntryTicker() {
 		}
 		if len(rf.commandChan) > 0 {
 			newLogEntry := logEntry{Term: rf.currentTerm, Command: <-rf.commandChan}
-			args.LogEntries = append(args.LogEntries, newLogEntry)
+			//args.LogEntries = append(args.LogEntries, newLogEntry)
+			rf.mu.Lock()
+			rf.logEntries=append(rf.logEntries,newLogEntry)
+			rf.mu.Unlock()
 		}
 
 		counter:=voteCounter{}
-		counter.votedServer=[]int{}
+		counter.votedServer=[]int{me}
 
 		for i := 0; i < len(rf.peers); i++ {
+			if i==me{
+				continue
+			}
 			go rf.appendEntrySender(i, args,&counter)
 		}
 
