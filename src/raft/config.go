@@ -221,7 +221,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			}
 		} else {
 			// Ignore other types of ApplyMsg or old
-			// commands. Old command may never happen,
+			// commands. Old Command may never happen,
 			// depending on the Raft implementation, but
 			// just in case.
 			// DPrintf("Ignore: Index %v lastApplied %v\n", m.CommandIndex, lastApplied)
@@ -493,7 +493,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // same value, since nCommitted() checks this,
 // as do the threads that read from applyCh.
 // returns index.
-// if retry==true, may submit the command multiple
+// if retry==true, may submit the Command multiple
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
@@ -522,14 +522,14 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 
 		if index != -1 {
 			// somebody claimed to be the leader and to have
-			// submitted our command; wait a while for agreement.
+			// submitted our Command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
-						// and it was the command we submitted.
+						// and it was the Command we submitted.
 						return index
 					}
 				}
