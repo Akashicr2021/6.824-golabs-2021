@@ -20,10 +20,9 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -264,7 +263,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 		msg.CommandIndex = i
 		msg.CommandValid = true
 		rf.applyChan <- msg
-		logger.Printf("node %d: commit log %v", rf.me, msg.Command)
+		//logger.Printf("node %d: commit log %v", rf.me, msg.Command)
 	}
 	if rf.commitIndex < index {
 		rf.commitIndex = index
@@ -334,7 +333,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
-	logger.Printf("node %d: receive append entry from %d, term is %d", rf.me, args.Leader, args.Term)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//code to handle heart beat
@@ -501,7 +500,7 @@ func (rf *Raft) appendEntryTicker() {
 
 		if leader != me {
 			rf.mu.Lock()
-			rf.commandChan = make(chan interface{}, 10)
+			rf.commandChan = make(chan interface{}, 1000)
 			rf.mu.Unlock()
 			break
 		}
@@ -566,7 +565,6 @@ func (rf *Raft) requestVoteReplyHandler(
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	logger.Printf("node %d: receive vote request from %d, term is %d", rf.me, args.CandidateID, args.Term)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -613,7 +611,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.persist()
 		rf.timeOut4Leader = false //reset timeout here???
 		reply.VoteGranted = true
-		logger.Printf("node %d: vote to %d", rf.me, args.CandidateID)
 	}
 
 }
@@ -722,7 +719,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(os.Stdout, "[DEBUG] ", 0)
+		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
@@ -732,7 +729,7 @@ func Make(
 	rf.leader = -1
 
 	rf.nextIndex = make([]int, len(peers))
-	rf.commandChan = make(chan interface{}, 100)
+	rf.commandChan = make(chan interface{}, 1000)  //may cause block and dead lock
 	rf.applyChan = applyCh
 
 	// initialize from state persisted before a crash
