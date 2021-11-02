@@ -383,21 +383,31 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	//accept the append entry
 	reply.Success = true
 
-	newSlotNum :=args.PreLogIndex+len(args.LogEntries)-len(rf.logEntries)+1
-	if newSlotNum >0{
-		rf.logEntries=append(rf.logEntries,make([]logEntry, newSlotNum)...)
-	}
+	isDiff:=false
 	for i:=0;i<len(args.LogEntries);i++{
-		nextIndex := i + args.PreLogIndex + 1
-		rf.logEntries[nextIndex]=args.LogEntries[i]
+		syncIndex:=args.PreLogIndex+i+1
+		//log len is different
+		if syncIndex==len(rf.logEntries){
+			isDiff=true
+			break
+		}
+		//term is different
+		if rf.logEntries[syncIndex]!=args.LogEntries[i]{
+			isDiff=true
+			break
+		}
 	}
-
-	if len(args.LogEntries) > 0 {
-		logger.Printf("node %d: accept append, term %d, leaderCommit %d, preLogIndex %d, newly logEntries %v", rf.me, args.Term, args.LeaderCommit, args.PreLogIndex, args.LogEntries)
-		logger.Printf("node %d: current log %v", rf.me, rf.logEntries)
+	//trunc the logs
+	if isDiff{
+		rf.logEntries=append(rf.logEntries[0:args.PreLogIndex+1],args.LogEntries...)
+		if len(args.LogEntries) > 0 {
+			logger.Printf("node %d: accept append, term %d, leaderCommit %d, preLogIndex %d, newly logEntries %v", rf.me, args.Term, args.LeaderCommit, args.PreLogIndex, args.LogEntries)
+			logger.Printf("node %d: current log %v", rf.me, rf.logEntries)
+		}
 	}
 	rf.commitEntriesUntilIndex(args.LeaderCommit)
-	rf.persist()
+	rf.persist() //TODO: reduce unnecessary persist
+
 }
 
 func (rf *Raft) sendAppendEntry(
@@ -432,7 +442,8 @@ func (rf *Raft) appendEntryReplyHandler(
 			counter.votedServer = append(counter.votedServer, serverIndex)
 			if counter.count > len(rf.peers)/2 {
 				index := args.PreLogIndex + len(args.LogEntries)
-				logger.Printf("node %d, leader commit to %d, current log is %v",rf.me,index,rf.logEntries)
+				//TODO: reduce unnecessary log
+				//logger.Printf("node %d, leader commit to %d, current log is %v",rf.me,index,rf.logEntries)
 				rf.commitEntriesUntilIndex(index)
 			}
 			counter.mu.Unlock()
@@ -579,6 +590,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//candidate log is old, reject
 		//compare the LastLogIndex rather than last applied, because some logs are committed
 		//but are not applied for the time being
+		logger.Printf("node %d: my last log %v, candidate last log term %d",rf.me,rf.logEntries[lastLogIndex],args.LastLogTerm)
 		if args.LastLogTerm < rf.logEntries[lastLogIndex].Term {
 			reply.VoteGranted = false
 			logger.Printf("node %d: reject vote, my last log term is %d but the leader last log term %d", rf.me, rf.logEntries[lastLogIndex].Term, args.LastLogTerm)
