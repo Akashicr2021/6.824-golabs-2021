@@ -20,10 +20,9 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -268,6 +267,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 	}
 	if rf.commitIndex < index {
 		rf.commitIndex = index
+		rf.persist()
 	}
 }
 
@@ -333,6 +333,40 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) checkAppendEntryArgs(args *AppendEntryArgs, reply *AppendEntryReply) bool{
+	//reject if the Term is old
+	if args.Term < rf.currentTerm {
+		logger.Printf(
+			"node %d: reject append, current term is %d but the request term is %d",
+			rf.me, rf.currentTerm, args.Term,
+		)
+		return false
+	}
+
+	reply.LogLen = len(rf.logEntries)
+	reply.ConflictTermFirstIndex = reply.LogLen
+	//reject if pre info is wrong
+	if args.PreLogIndex >= len(rf.logEntries) {
+		logger.Printf("node %d: reject append, preLogIndex is %d, len of log is %d", rf.me, args.PreLogIndex, len(rf.logEntries))
+		return false
+	}
+	if rf.logEntries[args.PreLogIndex].Term != args.PreLogTerm {
+		reply.ConflictTerm = rf.logEntries[args.PreLogIndex].Term
+		for i := args.PreLogIndex; i > 0; i-- {
+			if rf.logEntries[i-1].Term != reply.ConflictTerm {
+				reply.ConflictTermFirstIndex = i
+				break
+			}
+		}
+		logger.Printf(
+			"node %d: reject append, last log term in local is %d but the last log term in args is %d",
+			rf.me, rf.logEntries[args.PreLogIndex].Term, args.PreLogTerm,
+		)
+		return false
+	}
+	return true
+}
+
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -347,41 +381,11 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Term = rf.currentTerm
 	reply.Leader = rf.leader
 	reply.ServerIndex = rf.me
-	//code to handle append entry
-	//reject if the Term is old
-	reply.Success = false
-	if args.Term < rf.currentTerm {
-		logger.Printf(
-			"node %d: reject append, current term is %d but the request term is %d",
-			rf.me, rf.currentTerm, args.Term,
-		)
-		return
-	}
-
-	reply.LogLen = len(rf.logEntries)
-	reply.ConflictTermFirstIndex = reply.LogLen
-	//reject if pre info is wrong
-	if args.PreLogIndex >= len(rf.logEntries) {
-		logger.Printf("node %d: reject append, preLogIndex is %d, len of log is %d", rf.me, args.PreLogIndex, len(rf.logEntries))
-		return
-	}
-	if rf.logEntries[args.PreLogIndex].Term != args.PreLogTerm {
-		reply.ConflictTerm = rf.logEntries[args.PreLogIndex].Term
-		for i := args.PreLogIndex; i > 0; i-- {
-			if rf.logEntries[i-1].Term != reply.ConflictTerm {
-				reply.ConflictTermFirstIndex = i
-				break
-			}
-		}
-		logger.Printf(
-			"node %d: reject append, last log term in local is %d but the last log term in args is %d",
-			rf.me, rf.logEntries[args.PreLogIndex].Term, args.PreLogTerm,
-		)
-		return
-	}
-
 	//accept the append entry
-	reply.Success = true
+	reply.Success = rf.checkAppendEntryArgs(args,reply)
+	if !reply.Success{
+		return
+	}
 
 	isDiff:=false
 	for i:=0;i<len(args.LogEntries);i++{
@@ -405,9 +409,9 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			logger.Printf("node %d: current log %v", rf.me, rf.logEntries)
 		}
 	}
-	rf.commitEntriesUntilIndex(args.LeaderCommit)
-	rf.persist() //TODO: reduce unnecessary persist
-
+	if args.LeaderCommit>rf.commitIndex{
+		rf.commitEntriesUntilIndex(args.LeaderCommit)
+	}
 }
 
 func (rf *Raft) sendAppendEntry(
@@ -429,8 +433,11 @@ func (rf *Raft) appendEntryReplyHandler(
 	serverIndex int, args AppendEntryArgs, reply *AppendEntryReply, counter *voteCounter,
 ) {
 	rf.mu.Lock()
-	//only handle the situation when reply term is the same as the leader term
-	if rf.leader == rf.me && args.Term == rf.currentTerm &&args.Term==reply.Term {
+	if reply.Term > rf.currentTerm {
+		rf.updateTerm(reply.Term, reply.Leader)
+	}
+	//only handle the situation when reply term == leader term == args term
+	if rf.leader == rf.me && args.Term == rf.currentTerm {
 		if reply.Success {
 			next := args.PreLogIndex + len(args.LogEntries) + 1
 			//the if is needed because the reply can be old
@@ -459,10 +466,6 @@ func (rf *Raft) appendEntryReplyHandler(
 			args=rf.genAppendEntryArgs4SpecificPeer(serverIndex,args)
 			go rf.appendEntrySender(serverIndex, args, counter)
 		}
-	}
-
-	if reply.Term > rf.currentTerm {
-		rf.updateTerm(reply.Term, reply.Leader)
 	}
 	rf.mu.Unlock()
 }
@@ -716,7 +719,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(os.Stdout, "[DEBUG] ", 0)
+		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
