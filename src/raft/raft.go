@@ -63,6 +63,40 @@ type logEntry struct {
 
 var logger *log.Logger
 
+//
+// example RequestVote RPC arguments structure.
+// field names must start with capital letters!
+//
+type RequestVoteArgs struct {
+	// Your data here (2A, 2B).
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+type installSnapshotArgs struct {
+	Term              int
+	LeaderID          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type installSnapshotReply struct {
+	Term int
+}
+
+//
+// example RequestVote RPC reply structure.
+// field names must start with capital letters!
+//
+type RequestVoteReply struct {
+	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
 type AppendEntryArgs struct {
 	Term   int
 	Leader int
@@ -81,6 +115,12 @@ type AppendEntryReply struct {
 	ConflictTerm           int
 	ConflictTermFirstIndex int
 	LogLen                 int
+}
+
+type voteCounter struct {
+	count       int
+	votedServer []int
+	mu          sync.Mutex
 }
 
 //
@@ -206,26 +246,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-type installSnapshotArgs struct {
-	Term              int
-	LeaderID          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Data              []byte
-}
-
-type installSnapshotReply struct {
-	Term int
-}
-
-func (rf *Raft) sendInstallSnapshot(
-	server int, args *installSnapshotArgs, reply *installSnapshotReply,
-) bool {
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	return ok
-}
-
-func (rf *Raft) syncSnapshot(serverIndex int) {
+func (rf *Raft) syncSnapshotWithPeer(serverIndex int) {
 	rf.mu.Lock()
 	snapshotArgs := installSnapshotArgs{
 		Term:              rf.currentTerm,
@@ -239,9 +260,16 @@ func (rf *Raft) syncSnapshot(serverIndex int) {
 	rf.sendInstallSnapshot(serverIndex, &snapshotArgs, &snapshotReply)
 }
 
+func (rf *Raft) sendInstallSnapshot(
+	server int, args *installSnapshotArgs, reply *installSnapshotReply,
+) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 func (rf *Raft) InstallSnapshot(args *installSnapshotArgs, reply *installSnapshotReply) {
 	rf.mu.Lock()
-	rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
 	if args.Term > rf.currentTerm {
 		rf.updateTermVoteLeader(args.Term, -1, args.LeaderID)
@@ -314,34 +342,6 @@ func (rf *Raft) updataeSnapshot(index int, term int, snapshot []byte) {
 	rf.persist()
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateID  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-}
-
-type voteCounter struct {
-	count       int
-	votedServer []int
-	mu          sync.Mutex
-}
-
 func (rf *Raft) updateTermVoteLeader(newTerm int, vote int, leader int) {
 	rf.currentTerm = newTerm
 	rf.votedFor = vote
@@ -383,7 +383,6 @@ func (rf *Raft) getEntryCommand(index int) interface{} {
 	return rf.logEntries[index].Command
 }
 
-//TODO: should be called without lock!!!!
 func (rf *Raft) commitEntriesUntilIndex(index int) {
 	msgArray:=make([]ApplyMsg,0)
 	for i := rf.commitIndex + 1; i <= index; i++ {
@@ -403,6 +402,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 		}
 
 	}
+	//use goroutine to free the lock
 	go commitFunc()
 
 	if rf.commitIndex < index {
@@ -547,8 +547,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	//trunc the logs
 	if isDiff {
 		tmpEntries := rf.getEntries(rf.snapshotLastIndex+1, args.PreLogIndex+1)
+		//may have bug: the args.LogEntries may contain the entry before the lastIncluded Index
 		rf.logEntries = append(tmpEntries, args.LogEntries...)
 		if len(args.LogEntries) > 0 {
+			rf.persist()
 			logger.Printf(
 				"node %d: accept append, term %d, leaderCommit %d, preLogIndex %d, newly logEntries %v",
 				rf.me, args.Term, args.LeaderCommit, args.PreLogIndex, args.LogEntries,
@@ -596,7 +598,7 @@ func (rf *Raft) appendEntryReplyHandler(
 			counter.votedServer = append(counter.votedServer, serverIndex)
 			if counter.count > len(rf.peers)/2 {
 				index := args.PreLogIndex + len(args.LogEntries)
-				//TODO: reduce unnecessary log
+				//index:=args.LeaderCommit
 				//logger.Printf("node %d, leader commit to %d, current log is %v",rf.me,index,rf.logEntries)
 				rf.commitEntriesUntilIndex(index)
 			}
@@ -610,7 +612,7 @@ func (rf *Raft) appendEntryReplyHandler(
 				syncIndex = reply.ConflictTermFirstIndex
 			}
 			if syncIndex <= rf.snapshotLastIndex {
-				go rf.syncSnapshot(serverIndex)
+				go rf.syncSnapshotWithPeer(serverIndex)
 				syncIndex = rf.snapshotLastIndex + 1
 				rf.nextIndex[serverIndex] = syncIndex
 			} else {
@@ -679,7 +681,7 @@ func (rf *Raft) appendEntryTicker() {
 				continue
 			}
 			if rf.nextIndex[i] <= rf.snapshotLastIndex {
-				go rf.syncSnapshot(i)
+				go rf.syncSnapshotWithPeer(i)
 				rf.nextIndex[i] = rf.snapshotLastIndex + 1
 			} else {
 				args := rf.genAppendEntryArgs4SpecificPeer(i, basicArgs)
