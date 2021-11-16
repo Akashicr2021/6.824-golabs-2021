@@ -23,6 +23,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType string
+
 }
 
 type KVServer struct {
@@ -35,11 +37,32 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kv map[string]string
+
+	applyChObserver map[int][]chan Op
+}
+
+type observer struct {
+	index int
+	notifyChan chan Op
+}
+
+func (kv *KVServer) listenCommit(index int) chan Op{
+
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op:=Op{OpType: "Get"}
+
+	index,_,isleader:= kv.rf.Start(op)
+	if !isleader{
+		reply.Err=ErrWrongLeader
+		return
+	}
+
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
