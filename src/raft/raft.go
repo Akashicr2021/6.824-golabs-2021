@@ -689,7 +689,7 @@ func (rf *Raft) appendEntryTicker() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Millisecond * 100)
+		time.Sleep(time.Millisecond * 15)
 	}
 }
 
@@ -842,7 +842,7 @@ func (rf *Raft) ticker() {
 		rf.timeOut4Leader = true
 		rf.mu.Unlock()
 
-		timeout := time.Duration(400 + rand.Int()%300)
+		timeout := time.Duration(100 + rand.Int()%100)
 		time.Sleep(time.Millisecond * timeout)
 
 		rf.mu.Lock()

@@ -18,13 +18,15 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpType string
-
+	OpType       string
+	Key          string
+	Value        string
+	ClerkID      int64
+	RequestCount int
 }
 
 type KVServer struct {
@@ -37,36 +39,149 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kv map[string]string
-
-	applyChObserver map[int][]chan Op
+	kv                   map[string]string
+	clerkRequestMaxCount map[int64]int
+	executeObserver      map[int][]chan executeRes
 }
 
-type observer struct {
-	index int
-	notifyChan chan Op
+type executeRes struct {
+	index     int
+	executeOp Op
+	value     string
+	err       Err
 }
 
-func (kv *KVServer) listenCommit(index int) chan Op{
+func (kv *KVServer) execute() {
+
+	for true {
+		applyMsg := <-kv.applyCh
+		op := applyMsg.Command.(Op)
+		res := executeRes{
+			index:     applyMsg.CommandIndex,
+			executeOp: op,
+		}
+		DPrintf("server %d: op commited, type %s, clerkID %d, requestCount %d",kv.me,op.OpType,op.ClerkID,op.RequestCount)
+		kv.mu.Lock()
+		switch op.OpType {
+		case "Get":
+			res.value = kv.kv[op.Key]
+			res.err = OK
+		case "Put":
+			kv.kv[op.Key] = op.Value
+			res.err = OK
+		case "Append":
+			kv.kv[op.Key] += op.Value
+			res.err = OK
+		}
+		observerList := kv.executeObserver[res.index]
+		delete(kv.executeObserver, res.index)
+		kv.mu.Unlock()
+
+		for i := 0; i < len(observerList); i++ {
+			observerList[i] <- res
+		}
+
+	}
 
 }
 
+func (kv *KVServer) listenExecute(index int) chan executeRes {
+	ret := make(chan executeRes, 1)
+	kv.executeObserver[index] = append(kv.executeObserver[index], ret)
+	return ret
+}
+
+func (kv *KVServer) checkOpMatch(originalOp Op, res executeRes) bool {
+	if originalOp == res.executeOp {
+		return true
+	}
+	return false
+}
+
+//func (kv *KVServer) checkDuplicate(ClerkID int64,RequestCount int) bool {
+//	if kv.clerkRequestMaxCount[ClerkID]>=RequestCount{
+//		return true
+//	}
+//	return false
+//}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op:=Op{OpType: "Get"}
+	kv.mu.Lock()
+	DPrintf(
+		"server %d: receive Get request, clerkID %d, requestCount %d", kv.me,
+		args.ClerkID, args.RequestCount,
+	)
+	op := Op{
+		OpType:       "Get",
+		Key:          args.Key,
+		ClerkID:      args.ClerkID,
+		RequestCount: args.RequestCount,
+	}
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	DPrintf(
+		"server %d: wait for Get request, clerkID %d, requestCount %d, index %d", kv.me,
+		args.ClerkID, args.RequestCount, index,
+	)
+	executeResListener := kv.listenExecute(index)
+	kv.mu.Unlock()
 
-	index,_,isleader:= kv.rf.Start(op)
-	if !isleader{
-		reply.Err=ErrWrongLeader
+	res := <-executeResListener
+
+	if !kv.checkOpMatch(op, res) {
+		DPrintf(
+			"server %d: committed op not matched Get request, clerkID %d, requestCount %d, index %d", kv.me,
+			args.ClerkID, args.RequestCount, index,
+		)
+		reply.Err = ErrWrongLeader //should this be ErrWrongLeader?
 		return
 	}
 
-
+	reply.Err = res.err
+	reply.Value = res.value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	DPrintf(
+		"server %d: receive %s request, clerkID %d, requestCount %d", kv.me,args.Op,
+		args.ClerkID, args.RequestCount,
+	)
+	op := Op{
+		OpType:       args.Op,
+		Key:          args.Key,
+		Value:        args.Value,
+		ClerkID:      args.ClerkID,
+		RequestCount: args.RequestCount,
+	}
+
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	executeResListener := kv.listenExecute(index)
+	kv.mu.Unlock()
+
+	res := <-executeResListener
+
+	if !kv.checkOpMatch(op, res) {
+		DPrintf(
+			"server %d: committed op not matched %s request, clerkID %d, requestCount %d, index %d", kv.me,args.Op,
+			args.ClerkID, args.RequestCount, index,
+		)
+		reply.Err = ErrWrongLeader //should this be ErrWrongLeader?
+		return
+	}
+
+	reply.Err = res.err
 }
 
 //
@@ -104,7 +219,9 @@ func (kv *KVServer) killed() bool {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+func StartKVServer(
+	servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int,
+) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
@@ -119,6 +236,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.kv = make(map[string]string)
+	kv.clerkRequestMaxCount = make(map[int64]int)
+	kv.executeObserver = make(map[int][]chan executeRes)
+
+	go kv.execute()
 
 	return kv
 }
