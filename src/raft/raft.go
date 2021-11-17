@@ -21,9 +21,10 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -242,7 +243,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.snapshotLastIndex =snapshotLastIndex
 		rf.snapshotLastTerm=snapshotLastTerm
 		rf.snapshot=snapshot
-		logger.Printf("node %d: recover from persist, log %v", rf.me, rf.logEntries)
+		//logger.Printf("node %d: recover from persist, log %v", rf.me, rf.logEntries)
 	}
 }
 
@@ -511,6 +512,7 @@ func (rf *Raft) checkAppendEntryArgs(
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
+	logger.Printf("node %d: receive append entry from %d, term is %d",rf.me,args.Leader,rf.currentTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.checkRemoteTermAndUpdate(args.Term, args.Leader) < 0 {
@@ -555,7 +557,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 				"node %d: accept append, term %d, leaderCommit %d, preLogIndex %d, newly logEntries %v",
 				rf.me, args.Term, args.LeaderCommit, args.PreLogIndex, args.LogEntries,
 			)
-			logger.Printf("node %d: current log %v", rf.me, rf.logEntries)
+			//logger.Printf("node %d: current log %v", rf.me, rf.logEntries)
 		}
 	}
 
@@ -895,7 +897,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
+		logger = log.New(os.Stdout, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1

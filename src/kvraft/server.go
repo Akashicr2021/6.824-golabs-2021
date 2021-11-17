@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = true
@@ -59,6 +60,18 @@ type executeRes struct {
 	err       Err
 }
 
+func (kv *KVServer) checkLeaderState(){
+	for true{
+		time.Sleep(time.Millisecond * 300)
+		kv.mu.Lock()
+		term,_:=kv.rf.GetState()
+		if term>kv.term{
+			kv.termChange(term)
+		}
+		kv.mu.Unlock()
+	}
+}
+
 func (kv *KVServer) execute() {
 
 	for true {
@@ -68,7 +81,6 @@ func (kv *KVServer) execute() {
 			kv.mu.Unlock()
 			continue
 		}
-		kv.mu.Unlock()
 
 		op := applyMsg.Command.(Op)
 		res := executeRes{
@@ -79,7 +91,7 @@ func (kv *KVServer) execute() {
 			"server %d: op commited, type %s, clerkID %d, requestCount %d", kv.me,
 			op.OpType, op.ClerkID, op.RequestCount,
 		)
-		kv.mu.Lock()
+
 		switch op.OpType {
 		case "Get":
 			res.value = kv.kv[op.Key]
@@ -98,15 +110,14 @@ func (kv *KVServer) execute() {
 			)
 		}
 		observerList := kv.executeResObserver[res.index]
-		delete(kv.executeResObserver, res.index)
 		delObserverKey := kv.getObserverKey(op.ClerkID, op.RequestCount-1)
 		addObserverKey := kv.getObserverKey(op.ClerkID, op.RequestCount)
-
+		delete(kv.executeResObserver, res.index)
 		delete(kv.observeIndex, delObserverKey)
 		delete(kv.cacheRes, delObserverKey)
 		kv.cacheRes[addObserverKey] = res
-
 		kv.executeIndex = applyMsg.CommandIndex
+
 		kv.mu.Unlock()
 
 		for i := 0; i < len(observerList); i++ {
@@ -129,13 +140,14 @@ func (kv *KVServer) termChange(newTerm int){
 }
 
 func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
-
-	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
 	index := -1
 	isleader := true
 	ok := true
 	term:=0
 	observerKey := kv.getObserverKey(op.ClerkID, op.RequestCount)
+	resChan := make(chan executeRes, 1)
+
+	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
 	if !isDuplicate {
 		index, term, isleader = kv.rf.Start(op)
 		if term>kv.term{
@@ -146,32 +158,35 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 		}
 		kv.observeIndex[observerKey] = index
 		kv.clerkRequestMaxCount[op.ClerkID] = op.RequestCount
+		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
 	} else {
 		if index, ok = kv.observeIndex[observerKey]; !ok {
 			fmt.Printf("fatal error! observeIndex not exist!")
 			os.Exit(-1)
 		}
 		index = kv.observeIndex[observerKey]
-	}
 
-	resChan := make(chan executeRes, 1)
-	if index <= kv.executeIndex {
-		go func() {
-			res := executeRes{}
-			ok := true
-			if res, ok = kv.cacheRes[observerKey]; !ok {
-				fmt.Printf("fatal error! cache not exist!")
-				os.Exit(-1)
-			}
-			resChan <- res
-		}()
-	} else {
-		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
+		if index <= kv.executeIndex {
+			go func() {
+				res := executeRes{}
+				ok := true
+				if res, ok = kv.cacheRes[observerKey]; !ok {
+					fmt.Printf("fatal error! cache not exist!")
+					os.Exit(-1)
+				}
+				resChan <- res
+			}()
+		} else {
+			kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
+		}
 	}
 	return isleader, resChan
 }
 
 func (kv *KVServer) checkOpMatch(originalOp Op, res executeRes) bool {
+	if res.err==ErrWrongLeader{
+		return false
+	}
 	if originalOp == res.executeOp {
 		return true
 	}
@@ -212,11 +227,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	res := <-executeResListener
 
 	if !kv.checkOpMatch(op, res) {
-		//DPrintf(
-		//	"server %d: committed op not matched Get request, clerkID %d, requestCount %d, index %d",
-		//	kv.me,
-		//	args.ClerkID, args.RequestCount, index,
-		//)
 		reply.Err = ErrWrongLeader //should this be ErrWrongLeader?
 		return
 	}
@@ -255,7 +265,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader //should this be ErrWrongLeader?
 		return
 	}
-
 	reply.Err = res.err
 }
 
@@ -319,6 +328,7 @@ func StartKVServer(
 	kv.executeIndex = -1
 
 	go kv.execute()
+	go kv.checkLeaderState()
 
 	return kv
 }
