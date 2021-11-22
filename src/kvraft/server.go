@@ -49,8 +49,9 @@ type KVServer struct {
 	observeIndex         map[string]int
 	cacheRes             map[string]executeRes
 
-	term         int
-	executeIndex int
+	term           int
+	executeIndex   int
+	committedIndex int
 }
 
 type executeRes struct {
@@ -77,10 +78,12 @@ func (kv *KVServer) execute() {
 	for true {
 		applyMsg := <-kv.applyCh
 		kv.mu.Lock()
-		if applyMsg.CommandIndex < kv.executeIndex {
+
+		if applyMsg.CommandIndex <= kv.committedIndex {
 			kv.mu.Unlock()
 			continue
 		}
+		kv.committedIndex=applyMsg.CommandIndex
 
 		op := applyMsg.Command.(Op)
 		res := executeRes{
@@ -88,7 +91,7 @@ func (kv *KVServer) execute() {
 			executeOp: op,
 		}
 		DPrintf(
-			"server %d: op commited, type %s, clerkID %d, requestCount %d", kv.me,
+			"server %d: op commited, commited index %d, index %d, type %s, clerkID %d, requestCount %d", kv.me,kv.committedIndex,applyMsg.CommandIndex,
 			op.OpType, op.ClerkID, op.RequestCount,
 		)
 
@@ -171,8 +174,9 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 				res := executeRes{}
 				ok := true
 				if res, ok = kv.cacheRes[observerKey]; !ok {
-					fmt.Printf("fatal error! cache not exist!")
-					os.Exit(-1)
+					res.err=ErrWrongLeader  //maybe has bug??
+					//fmt.Printf("fatal error! cache not exist!")
+					//os.Exit(-1)
 				}
 				resChan <- res
 			}()
@@ -209,7 +213,7 @@ func (kv *KVServer) getObserverKey(ClerkID int64, RequestCount int) string {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	fmt.Printf("server %d: receive get", kv.me)
+	//fmt.Printf("server %d: receive get", kv.me)
 	kv.mu.Lock()
 	op := Op{
 		OpType:       "Get",
@@ -236,7 +240,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	fmt.Printf("server %d: receive putappend", kv.me)
+	//fmt.Printf("server %d: receive putappend", kv.me)
 	// Your code here.
 	kv.mu.Lock()
 	op := Op{
@@ -326,6 +330,7 @@ func StartKVServer(
 	kv.observeIndex = make(map[string]int)
 	kv.cacheRes = make(map[string]executeRes)
 	kv.executeIndex = -1
+	kv.committedIndex=0
 
 	go kv.execute()
 	go kv.checkLeaderState()

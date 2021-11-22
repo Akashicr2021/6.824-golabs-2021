@@ -2,16 +2,17 @@ package kvraft
 
 import (
 	"6.824/labrpc"
+	"fmt"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leaderIndex int
-	clerkID int64
+	leaderIndex    int
+	clerkID        int64
 	requestCounter int
 }
 
@@ -26,7 +27,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.clerkID=nrand()
+	ck.clerkID = nrand()
 
 	return ck
 }
@@ -46,24 +47,15 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	args:=&GetArgs{
+	args := &GetArgs{
 		Key:          key,
 		ClerkID:      ck.clerkID,
 		RequestCount: ck.requestCounter,
 	}
-	reply:=&GetReply{}
+	reply := &GetReply{}
 	ck.requestCounter++
 
-	for true{
-		ok:=ck.servers[ck.leaderIndex].Call("KVServer.Get",args,reply)
-		if !ok{
-			continue
-		}
-		if reply.Err==OK{
-			break
-		}
-		ck.leaderIndex=(ck.leaderIndex+1)%len(ck.servers)
-	}
+	ck.RequestUntilSuccess("KVServer.Get", args, reply)
 
 	return reply.Value
 }
@@ -80,26 +72,17 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args:=&PutAppendArgs{
+	args := &PutAppendArgs{
 		Key:          key,
 		Value:        value,
 		Op:           op,
 		ClerkID:      ck.clerkID,
 		RequestCount: ck.requestCounter,
 	}
-	reply:=&PutAppendReply{}
+	reply := &PutAppendReply{}
 	ck.requestCounter++
 
-	for true{
-		ok:=ck.servers[ck.leaderIndex].Call("KVServer.PutAppend",args,reply)
-		if !ok{
-			continue
-		}
-		if reply.Err==OK{
-			break
-		}
-		ck.leaderIndex=(ck.leaderIndex+1)%len(ck.servers)
-	}
+	ck.RequestUntilSuccess("KVServer.PutAppend", args, reply)
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -107,4 +90,41 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) RequestUntilSuccess(
+	funcName string, args interface{}, reply interface{},
+) {
+	timeoutFunc := func(timeoutChan chan bool) {
+		time.Sleep(1 * time.Second)
+		timeoutChan <- true
+	}
+	remoteCallFunc := func(
+		remoteCallRetChan chan bool, args interface{}, reply interface{},
+	) {
+		ok := ck.servers[ck.leaderIndex].Call(funcName, args, reply)
+		remoteCallRetChan <- ok
+	}
+
+LOOP:
+	for true {
+		timeoutChan := make(chan bool, 1)
+		remoteCallRetChan := make(chan bool, 1)
+		go timeoutFunc(timeoutChan)
+		go remoteCallFunc(remoteCallRetChan, args, reply)
+
+		select {
+		case <-timeoutChan:
+			fmt.Printf("timeout")
+			//;
+		case ok := <-remoteCallRetChan:
+			if !ok {
+				//;do not send to the same server, send the request to other server
+			}
+			if reply.(ReplyInterface).getErr() == OK {
+				break LOOP
+			}
+		}
+		ck.leaderIndex = (ck.leaderIndex + 1) % len(ck.servers)
+	}
 }

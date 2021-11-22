@@ -35,3 +35,15 @@ type GetReply struct {
 	Err   Err
 	Value string
 }
+
+func (r *GetReply) getErr() Err{
+	return r.Err
+}
+
+func (r *PutAppendReply) getErr() Err{
+	return r.Err
+}
+
+type ReplyInterface interface {
+	getErr() Err
+}

@@ -512,7 +512,7 @@ func (rf *Raft) checkAppendEntryArgs(
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
-	logger.Printf("node %d: receive append entry from %d, term is %d",rf.me,args.Leader,rf.currentTerm)
+	//logger.Printf("node %d: receive append entry from %d, term is %d",rf.me,args.Leader,rf.currentTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.checkRemoteTermAndUpdate(args.Term, args.Leader) < 0 {
