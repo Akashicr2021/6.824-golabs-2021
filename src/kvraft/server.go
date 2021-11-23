@@ -43,15 +43,14 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kv map[string]string
+	kv                   map[string]string
 	clerkRequestMaxCount map[int64]int
 	executeResObserver   map[int][]chan executeRes //[index][]notifier
-	observeIndex         map[string]int
+	opIndexInLog         map[string]int
 	cacheRes             map[string]executeRes
 
 	term           int
 	executeIndex   int
-	committedIndex int
 }
 
 type executeRes struct {
@@ -79,11 +78,19 @@ func (kv *KVServer) execute() {
 		applyMsg := <-kv.applyCh
 		kv.mu.Lock()
 
-		if applyMsg.CommandIndex <= kv.committedIndex {
+		if applyMsg.CommandIndex <= kv.executeIndex {
 			kv.mu.Unlock()
 			continue
 		}
-		kv.committedIndex=applyMsg.CommandIndex
+
+		if applyMsg.CommandIndex>kv.executeIndex+1{
+			go func(){
+				time.Sleep(100*time.Millisecond)
+				kv.applyCh<-applyMsg
+			}()
+			kv.mu.Unlock()
+			continue
+		}
 
 		op := applyMsg.Command.(Op)
 		res := executeRes{
@@ -91,7 +98,7 @@ func (kv *KVServer) execute() {
 			executeOp: op,
 		}
 		DPrintf(
-			"server %d: op commited, commited index %d, index %d, type %s, clerkID %d, requestCount %d", kv.me,kv.committedIndex,applyMsg.CommandIndex,
+			"server %d: op commited, commited index %d, index %d, type %s, clerkID %d, requestCount %d", kv.me,kv.executeIndex,applyMsg.CommandIndex,
 			op.OpType, op.ClerkID, op.RequestCount,
 		)
 
@@ -113,10 +120,10 @@ func (kv *KVServer) execute() {
 			)
 		}
 		observerList := kv.executeResObserver[res.index]
-		delObserverKey := kv.getObserverKey(op.ClerkID, op.RequestCount-1)
-		addObserverKey := kv.getObserverKey(op.ClerkID, op.RequestCount)
+		delObserverKey := kv.getOpID(op.ClerkID, op.RequestCount-1)
+		addObserverKey := kv.getOpID(op.ClerkID, op.RequestCount)
 		delete(kv.executeResObserver, res.index)
-		delete(kv.observeIndex, delObserverKey)
+		delete(kv.opIndexInLog, delObserverKey)
 		delete(kv.cacheRes, delObserverKey)
 		kv.cacheRes[addObserverKey] = res
 		kv.executeIndex = applyMsg.CommandIndex
@@ -147,7 +154,7 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 	isleader := true
 	ok := true
 	term:=0
-	observerKey := kv.getObserverKey(op.ClerkID, op.RequestCount)
+	opID := kv.getOpID(op.ClerkID, op.RequestCount)
 	resChan := make(chan executeRes, 1)
 
 	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
@@ -159,21 +166,21 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 		if !isleader {
 			return isleader, nil
 		}
-		kv.observeIndex[observerKey] = index
+		kv.opIndexInLog[opID] = index
 		kv.clerkRequestMaxCount[op.ClerkID] = op.RequestCount
 		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
 	} else {
-		if index, ok = kv.observeIndex[observerKey]; !ok {
-			fmt.Printf("fatal error! observeIndex not exist!")
+		if index, ok = kv.opIndexInLog[opID]; !ok {
+			fmt.Printf("fatal error! opIndexInLog not exist!")
 			os.Exit(-1)
 		}
-		index = kv.observeIndex[observerKey]
+		index = kv.opIndexInLog[opID]
 
 		if index <= kv.executeIndex {
 			go func() {
 				res := executeRes{}
 				ok := true
-				if res, ok = kv.cacheRes[observerKey]; !ok {
+				if res, ok = kv.cacheRes[opID]; !ok {
 					res.err=ErrWrongLeader  //maybe has bug??
 					//fmt.Printf("fatal error! cache not exist!")
 					//os.Exit(-1)
@@ -198,16 +205,16 @@ func (kv *KVServer) checkOpMatch(originalOp Op, res executeRes) bool {
 }
 
 func (kv *KVServer) checkDuplicate(ClerkID int64, RequestCount int) bool {
-	if _, ok := kv.clerkRequestMaxCount[ClerkID]; !ok {
-		kv.clerkRequestMaxCount[ClerkID] = -1
-	}
+	//if _, ok := kv.clerkRequestMaxCount[ClerkID]; !ok {
+	//	kv.clerkRequestMaxCount[ClerkID] = -1
+	//}
 	if kv.clerkRequestMaxCount[ClerkID] >= RequestCount {
 		return true
 	}
 	return false
 }
 
-func (kv *KVServer) getObserverKey(ClerkID int64, RequestCount int) string {
+func (kv *KVServer) getOpID(ClerkID int64, RequestCount int) string {
 	return strconv.FormatInt(ClerkID, 10) + strconv.Itoa(RequestCount)
 }
 
@@ -293,6 +300,22 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+//func (kv *KVServer) receiveOldApplyMsgFromRaft() {
+//	receiveChan:=make(chan raft.ApplyMsg)
+//	go kv.rf.GetApplyMsgWithLock(receiveChan)
+//	for{
+//		msg,ok:=<-receiveChan
+//		if !ok{
+//			break
+//		}
+//		op := msg.Command.(Op)
+//
+//		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
+//			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
+//		}
+//	}
+//}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -327,10 +350,11 @@ func StartKVServer(
 	kv.kv = make(map[string]string)
 	kv.clerkRequestMaxCount = make(map[int64]int)
 	kv.executeResObserver = make(map[int][]chan executeRes)
-	kv.observeIndex = make(map[string]int)
+	kv.opIndexInLog = make(map[string]int)
 	kv.cacheRes = make(map[string]executeRes)
-	kv.executeIndex = -1
-	kv.committedIndex=0
+	kv.executeIndex = 0
+
+	//kv.receiveOldApplyMsgFromRaft()
 
 	go kv.execute()
 	go kv.checkLeaderState()

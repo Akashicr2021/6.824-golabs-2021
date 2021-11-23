@@ -401,7 +401,6 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 		for i:=0;i<len(msgArray);i++{
 			rf.applyChan <- msgArray[i]
 		}
-
 	}
 	//use goroutine to free the lock
 	go commitFunc()
@@ -410,6 +409,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 		rf.commitIndex = index
 	}
 }
+
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -874,6 +874,22 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 	}
 }
+
+func (rf *Raft) GetApplyMsgWithLock(receiveChan chan ApplyMsg) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	logLen:=rf.getNextEntryIndex()
+	for i := 1; i < logLen; i++ {
+		msg := ApplyMsg{}
+		msg.Command = rf.getEntryCommand(i)
+		msg.CommandIndex = i
+		msg.CommandValid = true
+		receiveChan<-msg
+	}
+	close(receiveChan)
+}
+
 
 //
 // the service or tester wants to create a Raft server. the ports
