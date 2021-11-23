@@ -46,8 +46,8 @@ type KVServer struct {
 	kv                   map[string]string
 	clerkRequestMaxCount map[int64]int
 	executeResObserver   map[int][]chan executeRes //[index][]notifier
-	opIndexInLog         map[string]int
 	cacheRes             map[string]executeRes
+	opIndexInLog         map[string]int
 
 	term           int
 	executeIndex   int
@@ -77,8 +77,13 @@ func (kv *KVServer) execute() {
 	for true {
 		applyMsg := <-kv.applyCh
 		kv.mu.Lock()
+		op := applyMsg.Command.(Op)
+
+		lastOpID := kv.getOpID(op.ClerkID, op.RequestCount-1)
+		opID := kv.getOpID(op.ClerkID, op.RequestCount)
 
 		if applyMsg.CommandIndex <= kv.executeIndex {
+			delete(kv.opIndexInLog, lastOpID)
 			kv.mu.Unlock()
 			continue
 		}
@@ -92,7 +97,6 @@ func (kv *KVServer) execute() {
 			continue
 		}
 
-		op := applyMsg.Command.(Op)
 		res := executeRes{
 			index:     applyMsg.CommandIndex,
 			executeOp: op,
@@ -120,12 +124,10 @@ func (kv *KVServer) execute() {
 			)
 		}
 		observerList := kv.executeResObserver[res.index]
-		delObserverKey := kv.getOpID(op.ClerkID, op.RequestCount-1)
-		addObserverKey := kv.getOpID(op.ClerkID, op.RequestCount)
 		delete(kv.executeResObserver, res.index)
-		delete(kv.opIndexInLog, delObserverKey)
-		delete(kv.cacheRes, delObserverKey)
-		kv.cacheRes[addObserverKey] = res
+		delete(kv.opIndexInLog, lastOpID)
+		delete(kv.cacheRes, lastOpID)
+		kv.cacheRes[opID] = res
 		kv.executeIndex = applyMsg.CommandIndex
 
 		kv.mu.Unlock()
@@ -159,6 +161,7 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 
 	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
 	if !isDuplicate {
+		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID])
 		index, term, isleader = kv.rf.Start(op)
 		if term>kv.term{
 			kv.termChange(term)
@@ -300,21 +303,23 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//func (kv *KVServer) receiveOldApplyMsgFromRaft() {
-//	receiveChan:=make(chan raft.ApplyMsg)
-//	go kv.rf.GetApplyMsgWithLock(receiveChan)
-//	for{
-//		msg,ok:=<-receiveChan
-//		if !ok{
-//			break
-//		}
-//		op := msg.Command.(Op)
-//
-//		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
-//			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
-//		}
-//	}
-//}
+func (kv *KVServer) receiveOldApplyMsgFromRaft() {
+	receiveChan:=make(chan raft.ApplyMsg)
+	go kv.rf.GetApplyMsgWithLock(receiveChan)
+	for{
+		msg,ok:=<-receiveChan
+		if !ok{
+			break
+		}
+		op := msg.Command.(Op)
+		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
+			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
+		}
+
+		opID:=kv.getOpID(op.ClerkID,op.RequestCount)
+		kv.opIndexInLog[opID]=msg.CommandIndex
+	}
+}
 
 //
 // servers[] contains the ports of the set of
@@ -354,7 +359,7 @@ func StartKVServer(
 	kv.cacheRes = make(map[string]executeRes)
 	kv.executeIndex = 0
 
-	//kv.receiveOldApplyMsgFromRaft()
+	kv.receiveOldApplyMsgFromRaft()
 
 	go kv.execute()
 	go kv.checkLeaderState()

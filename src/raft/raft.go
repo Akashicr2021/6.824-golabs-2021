@@ -21,10 +21,9 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -436,8 +435,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.leader == rf.me {
 		isLeader = true
 		term = rf.currentTerm
-		index = rf.getNextEntryIndex() + len(rf.commandChan)
-		rf.commandChan=append(rf.commandChan,command)
+		index = rf.getNextEntryIndex()
+
+		newLogEntry := logEntry{Term: rf.currentTerm, Command: command}
+		rf.logEntries = append(rf.logEntries, newLogEntry)
+		rf.persist()
 	}
 
 	rf.mu.Unlock()
@@ -661,12 +663,12 @@ func (rf *Raft) appendEntryTicker() {
 		//heartbeat
 		rf.timeOut4Leader = false
 		//append the new entry into the local logs
-		if len(rf.commandChan) > 0 {
-			newLogEntry := logEntry{Term: rf.currentTerm, Command: rf.commandChan[0]}
-			rf.commandChan=rf.commandChan[1:]
-			rf.logEntries = append(rf.logEntries, newLogEntry)
-			rf.persist()
-		}
+		//if len(rf.commandChan) > 0 {
+		//	newLogEntry := logEntry{Term: rf.currentTerm, Command: rf.commandChan[0]}
+		//	rf.commandChan=rf.commandChan[1:]
+		//	rf.logEntries = append(rf.logEntries, newLogEntry)
+		//	rf.persist()
+		//}
 		counter := voteCounter{
 			votedServer: []int{rf.me},
 			count:       1,
@@ -913,7 +915,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(os.Stdout, "[DEBUG] ", 0)
+		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
