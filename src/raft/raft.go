@@ -400,12 +400,13 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 
 	syncChan:=make(chan bool)
 	commitFunc:=func(){
-		rf.commitMu.Lock()
+		//TODO: lock will cause dead lock, non-lock will cause disorder. some other mechanism required here
+		//rf.commitMu.Lock()
 		syncChan<-true
 		for i:=0;i<len(msgArray);i++{
 			rf.applyChan <- msgArray[i]
 		}
-		rf.commitMu.Unlock()
+		//rf.commitMu.Unlock()
 	}
 	//use goroutine to free the lock
 	go commitFunc()
@@ -704,7 +705,7 @@ func (rf *Raft) appendEntryTicker() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Millisecond * 15)
+		time.Sleep(time.Millisecond * time.Duration(appendEntryInterval))
 	}
 }
 
@@ -857,7 +858,7 @@ func (rf *Raft) ticker() {
 		rf.timeOut4Leader = true
 		rf.mu.Unlock()
 
-		timeout := time.Duration(100 + rand.Int()%100)
+		timeout := time.Duration(leaderElectionInterval + rand.Int()%leaderElectionInterval)
 		time.Sleep(time.Millisecond * timeout)
 
 		rf.mu.Lock()
@@ -950,3 +951,6 @@ func Make(
 
 	return rf
 }
+
+var appendEntryInterval =100
+var leaderElectionInterval=300

@@ -6,7 +6,6 @@ import (
 	"6.824/raft"
 	"fmt"
 	"log"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -97,6 +96,10 @@ func (kv *KVServer) execute() {
 			continue
 		}
 
+		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
+			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
+		}
+
 		res := executeRes{
 			index:     applyMsg.CommandIndex,
 			executeOp: op,
@@ -169,14 +172,18 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 		if !isleader {
 			return isleader, nil
 		}
-		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d\n",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID])
+		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d, term:%d\n",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID],term)
 		kv.opIndexInLog[opID] = index
 		kv.clerkRequestMaxCount[op.ClerkID] = op.RequestCount
 		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
 	} else {
 		if index, ok = kv.opIndexInLog[opID]; !ok {
-			fmt.Printf("fatal error! opIndexInLog not exist!")
-			os.Exit(-1)
+			go func(){
+				res := executeRes{}
+				res.err=ErrWrongLeader
+				resChan <- res
+			}()
+			return isleader,resChan
 		}
 		index = kv.opIndexInLog[opID]
 
