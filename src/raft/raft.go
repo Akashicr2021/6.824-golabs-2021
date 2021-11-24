@@ -147,6 +147,7 @@ type Raft struct {
 	nextIndex   []int
 	applyChan   chan ApplyMsg
 	commitIndex int
+	commitMu sync.Mutex
 
 	snapshotLastIndex int
 	snapshotLastTerm  int
@@ -396,13 +397,19 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 		msgArray=append(msgArray,msg)
 		//logger.Printf("node %d: commit log %v", rf.me, msg.Command)
 	}
+
+	syncChan:=make(chan bool)
 	commitFunc:=func(){
+		rf.commitMu.Lock()
+		syncChan<-true
 		for i:=0;i<len(msgArray);i++{
 			rf.applyChan <- msgArray[i]
 		}
+		rf.commitMu.Unlock()
 	}
 	//use goroutine to free the lock
 	go commitFunc()
+	<-syncChan
 
 	if rf.commitIndex < index {
 		rf.commitIndex = index
@@ -604,7 +611,11 @@ func (rf *Raft) appendEntryReplyHandler(
 				index := args.PreLogIndex + len(args.LogEntries)
 				//index:=args.LeaderCommit
 				//logger.Printf("node %d, leader commit to %d, current log is %v",rf.me,index,rf.logEntries)
-				rf.commitEntriesUntilIndex(index)
+
+				//very important check, only commit the logs that contains the log with same term
+				if rf.getEntryTerm(index)==rf.currentTerm{
+					rf.commitEntriesUntilIndex(index)
+				}
 			}
 			counter.mu.Unlock()
 		} else {

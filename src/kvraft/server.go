@@ -161,7 +161,7 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 
 	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
 	if !isDuplicate {
-		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID])
+
 		index, term, isleader = kv.rf.Start(op)
 		if term>kv.term{
 			kv.termChange(term)
@@ -169,6 +169,7 @@ func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
 		if !isleader {
 			return isleader, nil
 		}
+		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d\n",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID])
 		kv.opIndexInLog[opID] = index
 		kv.clerkRequestMaxCount[op.ClerkID] = op.RequestCount
 		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)

@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"6.824/labrpc"
-	"fmt"
 	"time"
 )
 import "crypto/rand"
@@ -116,7 +115,6 @@ LOOP:
 
 		select {
 		case <-timeoutChan:
-			fmt.Printf("timeout")
 			//;
 		case ok := <-remoteCallRetChan:
 			if !ok {
