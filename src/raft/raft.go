@@ -21,9 +21,10 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -927,7 +928,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
+		logger = log.New(os.Stdout, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
@@ -952,5 +953,5 @@ func Make(
 	return rf
 }
 
-var appendEntryInterval =100
-var leaderElectionInterval=300
+var appendEntryInterval =15
+var leaderElectionInterval=100

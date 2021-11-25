@@ -4,12 +4,10 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
-	"fmt"
 	"log"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const Debug = true
@@ -43,72 +41,88 @@ type KVServer struct {
 
 	// Your definitions here.
 	kv                   map[string]string
-	clerkRequestMaxCount map[int64]int
-	executeResObserver   map[int][]chan executeRes //[index][]notifier
-	cacheRes             map[string]executeRes
-	opIndexInLog         map[string]int
+
+	clerkRequestMaxExecuteCount map[int64]int
+	logListeners                map[int][]string
+	chanToNotifyRes             map[string]notifyChanInfo //[reqID][chan]
+	cacheRes                    map[string]executeRes
 
 	term           int
 	executeIndex   int
 }
 
+type notifyChanInfo struct{
+	c chan executeRes
+	count int
+}
+
 type executeRes struct {
-	index     int
 	executeOp Op
 	value     string
 	err       Err
 }
 
-func (kv *KVServer) checkLeaderState(){
-	for true{
-		time.Sleep(time.Millisecond * 300)
-		kv.mu.Lock()
-		term,_:=kv.rf.GetState()
-		if term>kv.term{
-			kv.termChange(term)
+//func (kv *KVServer) checkLeaderState(){
+//	for true{
+//		time.Sleep(time.Millisecond * 300)
+//		kv.mu.Lock()
+//		term,_:=kv.rf.GetState()
+//		if term>kv.term{
+//			kv.termChange(term)
+//		}
+//		kv.mu.Unlock()
+//	}
+//}
+
+func (kv *KVServer) sendExecuteResOfReq(opID string,res executeRes){
+	if chanInfo,ok :=kv.chanToNotifyRes[opID];ok{
+		for j:=0;j< chanInfo.count;j++{
+			chanInfo.c<-res
 		}
-		kv.mu.Unlock()
 	}
+	delete(kv.chanToNotifyRes, opID)
 }
 
-func (kv *KVServer) execute() {
+func (kv *KVServer) notifyListener(index int,res executeRes){
+	listenerList:=kv.logListeners[index]
+	for i:=0;i<len(listenerList);i++{
+		opID :=listenerList[i]
+		kv.sendExecuteResOfReq(opID,res)
+	}
+	delete(kv.logListeners,index)
+}
 
+func (kv *KVServer) execute(msgChan chan raft.ApplyMsg) {
 	for true {
-		applyMsg := <-kv.applyCh
+		applyMsg := <-msgChan
 		kv.mu.Lock()
 		op := applyMsg.Command.(Op)
-
 		lastOpID := kv.getOpID(op.ClerkID, op.RequestCount-1)
 		opID := kv.getOpID(op.ClerkID, op.RequestCount)
+		res := executeRes{executeOp: op,}
 
+		//check if the raft send the old command
 		if applyMsg.CommandIndex <= kv.executeIndex {
-			delete(kv.opIndexInLog, lastOpID)
-			kv.mu.Unlock()
-			continue
+			goto UNLOCKANDCONTINUE
 		}
-
+		//check if raft return command in disorder
 		if applyMsg.CommandIndex>kv.executeIndex+1{
 			go func(){
-				time.Sleep(100*time.Millisecond)
-				kv.applyCh<-applyMsg
+				msgChan<-applyMsg
 			}()
-			kv.mu.Unlock()
-			continue
+			goto UNLOCKANDCONTINUE
 		}
 
-		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
-			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
+		kv.executeIndex++
+		//already execute the request
+		if kv.checkDuplicate(op.ClerkID,op.RequestCount){
+			goto UNLOCKANDCONTINUE
 		}
 
-		res := executeRes{
-			index:     applyMsg.CommandIndex,
-			executeOp: op,
-		}
 		DPrintf(
 			"server %d: op commited, commited index %d, index %d, type %s, clerkID %d, requestCount %d", kv.me,kv.executeIndex,applyMsg.CommandIndex,
 			op.OpType, op.ClerkID, op.RequestCount,
 		)
-
 		switch op.OpType {
 		case "Get":
 			res.value = kv.kv[op.Key]
@@ -126,83 +140,70 @@ func (kv *KVServer) execute() {
 				op.Value,
 			)
 		}
-		observerList := kv.executeResObserver[res.index]
-		delete(kv.executeResObserver, res.index)
-		delete(kv.opIndexInLog, lastOpID)
-		delete(kv.cacheRes, lastOpID)
-		kv.cacheRes[opID] = res
-		kv.executeIndex = applyMsg.CommandIndex
 
+		kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
+		kv.cacheRes[opID]=res
+		delete(kv.cacheRes,lastOpID)
+		kv.notifyListener(applyMsg.CommandIndex,res)
+		kv.sendExecuteResOfReq(opID,res)
+
+		UNLOCKANDCONTINUE:
 		kv.mu.Unlock()
-
-		for i := 0; i < len(observerList); i++ {
-			observerList[i] <- res
-		}
+		continue
 
 	}
 
 }
 
-func (kv *KVServer) termChange(newTerm int){
-	kv.term=newTerm
-	res:=executeRes{err: ErrWrongLeader}
-	for _,resChanList:=range kv.executeResObserver{
-		for _,resChan:=range resChanList{
-			resChan<-res
-		}
-	}
-	kv.executeResObserver=make(map[int][]chan executeRes)
-}
+//func (kv *KVServer) termChange(newTerm int){
+//	kv.term=newTerm
+//	res:=executeRes{err: ErrWrongLeader}
+//	for _,resChanList:=range kv.executeResObserver{
+//		for _,resChan:=range resChanList{
+//			resChan<-res
+//		}
+//	}
+//	kv.executeResObserver=make(map[int][]chan executeRes)
+//}
 
-func (kv *KVServer) callRaftAndListen(op Op) (bool, chan executeRes) {
+func (kv *KVServer) callRaftAndListen(op Op) chan executeRes {
+	opID := kv.getOpID(op.ClerkID, op.RequestCount)
+	res := executeRes{}
 	index := -1
 	isleader := true
 	ok := true
-	term:=0
-	opID := kv.getOpID(op.ClerkID, op.RequestCount)
 	resChan := make(chan executeRes, 1)
 
-	isDuplicate := kv.checkDuplicate(op.ClerkID, op.RequestCount)
-	if !isDuplicate {
-
-		index, term, isleader = kv.rf.Start(op)
-		if term>kv.term{
-			kv.termChange(term)
-		}
-		if !isleader {
-			return isleader, nil
-		}
-		fmt.Printf("server %d: not duplicate, opID %s, requestCount %d, max count: %d, term:%d\n",kv.me,opID,op.RequestCount,kv.clerkRequestMaxCount[op.ClerkID],term)
-		kv.opIndexInLog[opID] = index
-		kv.clerkRequestMaxCount[op.ClerkID] = op.RequestCount
-		kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
-	} else {
-		if index, ok = kv.opIndexInLog[opID]; !ok {
-			go func(){
-				res := executeRes{}
-				res.err=ErrWrongLeader
-				resChan <- res
-			}()
-			return isleader,resChan
-		}
-		index = kv.opIndexInLog[opID]
-
-		if index <= kv.executeIndex {
-			go func() {
-				res := executeRes{}
-				ok := true
-				if res, ok = kv.cacheRes[opID]; !ok {
-					res.err=ErrWrongLeader  //maybe has bug??
-					//fmt.Printf("fatal error! cache not exist!")
-					//os.Exit(-1)
-				}
-				resChan <- res
-			}()
-		} else {
-			kv.executeResObserver[index] = append(kv.executeResObserver[index], resChan)
-		}
+	//check if the request has been executed (may be send by self or other server)
+	if res,ok=kv.cacheRes[opID];ok{
+		resChan <- res
+		return resChan
 	}
-	return isleader, resChan
+
+	//check if already send the req to raft
+	if chanInfo,ok:=kv.chanToNotifyRes[opID];ok{
+		chanInfo.count++
+		return chanInfo.c
+	}
+
+	index, _, isleader = kv.rf.Start(op)
+	//if term>kv.term{
+	//	kv.termChange(term)
+	//}
+	if !isleader{
+		res.err=ErrWrongLeader
+		resChan <- res
+		return resChan
+	}
+
+	//already sent the req to raft, update listening message
+	kv.chanToNotifyRes[opID]=notifyChanInfo{c:resChan,count: 1}
+	kv.logListeners[index]=append(kv.logListeners[index],opID)
+	//if kv.clerkRequestMaxExecuteCount[op.ClerkID]<=op.RequestCount{
+	//	kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
+	//}
+
+	return resChan
 }
 
 func (kv *KVServer) checkOpMatch(originalOp Op, res executeRes) bool {
@@ -216,10 +217,7 @@ func (kv *KVServer) checkOpMatch(originalOp Op, res executeRes) bool {
 }
 
 func (kv *KVServer) checkDuplicate(ClerkID int64, RequestCount int) bool {
-	//if _, ok := kv.clerkRequestMaxCount[ClerkID]; !ok {
-	//	kv.clerkRequestMaxCount[ClerkID] = -1
-	//}
-	if kv.clerkRequestMaxCount[ClerkID] >= RequestCount {
+	if kv.clerkRequestMaxExecuteCount[ClerkID] >= RequestCount {
 		return true
 	}
 	return false
@@ -231,7 +229,6 @@ func (kv *KVServer) getOpID(ClerkID int64, RequestCount int) string {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	//fmt.Printf("server %d: receive get", kv.me)
 	kv.mu.Lock()
 	op := Op{
 		OpType:       "Get",
@@ -239,12 +236,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClerkID:      args.ClerkID,
 		RequestCount: args.RequestCount,
 	}
-	isleader, executeResListener := kv.callRaftAndListen(op)
-	if !isleader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
+	executeResListener := kv.callRaftAndListen(op)
 	kv.mu.Unlock()
 	res := <-executeResListener
 
@@ -268,22 +260,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClerkID:      args.ClerkID,
 		RequestCount: args.RequestCount,
 	}
-
-	isleader, executeResListener := kv.callRaftAndListen(op)
-	if !isleader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
+	executeResListener := kv.callRaftAndListen(op)
 	kv.mu.Unlock()
 	res := <-executeResListener
 
 	if !kv.checkOpMatch(op, res) {
-		//DPrintf(
-		//	"server %d: committed op not matched %s request, clerkID %d, requestCount %d, index %d",
-		//	kv.me, args.Op,
-		//	args.ClerkID, args.RequestCount, index,
-		//)
 		reply.Err = ErrWrongLeader //should this be ErrWrongLeader?
 		return
 	}
@@ -320,12 +301,12 @@ func (kv *KVServer) receiveOldApplyMsgFromRaft() {
 			break
 		}
 		op := msg.Command.(Op)
-		if kv.clerkRequestMaxCount[op.ClerkID]<op.RequestCount{
-			kv.clerkRequestMaxCount[op.ClerkID]=op.RequestCount
+		if kv.clerkRequestMaxExecuteCount[op.ClerkID]<op.RequestCount{
+			kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
 		}
 
-		opID:=kv.getOpID(op.ClerkID,op.RequestCount)
-		kv.opIndexInLog[opID]=msg.CommandIndex
+		//opID:=kv.getOpID(op.ClerkID,op.RequestCount)
+		//kv.opIndexInLog[opID]=msg.CommandIndex
 	}
 }
 
@@ -361,16 +342,15 @@ func StartKVServer(
 
 	// You may need initialization code here.
 	kv.kv = make(map[string]string)
-	kv.clerkRequestMaxCount = make(map[int64]int)
-	kv.executeResObserver = make(map[int][]chan executeRes)
-	kv.opIndexInLog = make(map[string]int)
+	kv.clerkRequestMaxExecuteCount = make(map[int64]int)
+	kv.logListeners = make(map[int][]string)
+	kv.chanToNotifyRes = make(map[string]notifyChanInfo)
 	kv.cacheRes = make(map[string]executeRes)
 	kv.executeIndex = 0
+	//kv.receiveOldApplyMsgFromRaft()
 
-	kv.receiveOldApplyMsgFromRaft()
-
-	go kv.execute()
-	go kv.checkLeaderState()
+	go kv.execute(kv.applyCh)
+	//go kv.checkLeaderState()
 
 	return kv
 }
