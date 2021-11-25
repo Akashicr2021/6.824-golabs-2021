@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -46,8 +46,6 @@ type KVServer struct {
 	logListeners                map[int][]string
 	chanToNotifyRes             map[string]notifyChanInfo //[reqID][chan]
 	cacheRes                    map[string]executeRes
-
-	term           int
 	executeIndex   int
 }
 
@@ -61,18 +59,6 @@ type executeRes struct {
 	value     string
 	err       Err
 }
-
-//func (kv *KVServer) checkLeaderState(){
-//	for true{
-//		time.Sleep(time.Millisecond * 300)
-//		kv.mu.Lock()
-//		term,_:=kv.rf.GetState()
-//		if term>kv.term{
-//			kv.termChange(term)
-//		}
-//		kv.mu.Unlock()
-//	}
-//}
 
 func (kv *KVServer) sendExecuteResOfReq(opID string,res executeRes){
 	if chanInfo,ok :=kv.chanToNotifyRes[opID];ok{
@@ -155,17 +141,6 @@ func (kv *KVServer) execute(msgChan chan raft.ApplyMsg) {
 
 }
 
-//func (kv *KVServer) termChange(newTerm int){
-//	kv.term=newTerm
-//	res:=executeRes{err: ErrWrongLeader}
-//	for _,resChanList:=range kv.executeResObserver{
-//		for _,resChan:=range resChanList{
-//			resChan<-res
-//		}
-//	}
-//	kv.executeResObserver=make(map[int][]chan executeRes)
-//}
-
 func (kv *KVServer) callRaftAndListen(op Op) chan executeRes {
 	opID := kv.getOpID(op.ClerkID, op.RequestCount)
 	res := executeRes{}
@@ -183,13 +158,12 @@ func (kv *KVServer) callRaftAndListen(op Op) chan executeRes {
 	//check if already send the req to raft
 	if chanInfo,ok:=kv.chanToNotifyRes[opID];ok{
 		chanInfo.count++
-		return chanInfo.c
+		resChan=chanInfo.c
+		//do not return here, still required to send a new request to raft
+		//return chanInfo.c
 	}
 
 	index, _, isleader = kv.rf.Start(op)
-	//if term>kv.term{
-	//	kv.termChange(term)
-	//}
 	if !isleader{
 		res.err=ErrWrongLeader
 		resChan <- res
@@ -197,11 +171,10 @@ func (kv *KVServer) callRaftAndListen(op Op) chan executeRes {
 	}
 
 	//already sent the req to raft, update listening message
-	kv.chanToNotifyRes[opID]=notifyChanInfo{c:resChan,count: 1}
+	if _,ok:=kv.chanToNotifyRes[opID];!ok {
+		kv.chanToNotifyRes[opID]=notifyChanInfo{c:resChan,count: 1}
+	}
 	kv.logListeners[index]=append(kv.logListeners[index],opID)
-	//if kv.clerkRequestMaxExecuteCount[op.ClerkID]<=op.RequestCount{
-	//	kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
-	//}
 
 	return resChan
 }
@@ -250,7 +223,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	//fmt.Printf("server %d: receive putappend", kv.me)
 	// Your code here.
 	kv.mu.Lock()
 	op := Op{
@@ -292,23 +264,20 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-func (kv *KVServer) receiveOldApplyMsgFromRaft() {
-	receiveChan:=make(chan raft.ApplyMsg)
-	go kv.rf.GetApplyMsgWithLock(receiveChan)
-	for{
-		msg,ok:=<-receiveChan
-		if !ok{
-			break
-		}
-		op := msg.Command.(Op)
-		if kv.clerkRequestMaxExecuteCount[op.ClerkID]<op.RequestCount{
-			kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
-		}
-
-		//opID:=kv.getOpID(op.ClerkID,op.RequestCount)
-		//kv.opIndexInLog[opID]=msg.CommandIndex
-	}
-}
+//func (kv *KVServer) receiveOldApplyMsgFromRaft() {
+//	receiveChan:=make(chan raft.ApplyMsg)
+//	go kv.rf.GetApplyMsgWithLock(receiveChan)
+//	for{
+//		msg,ok:=<-receiveChan
+//		if !ok{
+//			break
+//		}
+//		op := msg.Command.(Op)
+//		if kv.clerkRequestMaxExecuteCount[op.ClerkID]<op.RequestCount{
+//			kv.clerkRequestMaxExecuteCount[op.ClerkID]=op.RequestCount
+//		}
+//	}
+//}
 
 //
 // servers[] contains the ports of the set of
@@ -350,7 +319,7 @@ func StartKVServer(
 	//kv.receiveOldApplyMsgFromRaft()
 
 	go kv.execute(kv.applyCh)
-	//go kv.checkLeaderState()
+
 
 	return kv
 }

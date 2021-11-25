@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"6.824/labrpc"
+	"sync"
 	"time"
 )
 import "crypto/rand"
@@ -13,6 +14,7 @@ type Clerk struct {
 	leaderIndex    int
 	clerkID        int64
 	requestCounter int
+	mu sync.Mutex
 }
 
 func nrand() int64 {
@@ -55,9 +57,9 @@ func (ck *Clerk) Get(key string) string {
 	reply := &GetReply{}
 	ck.requestCounter++
 
-	ck.RequestUntilSuccess("KVServer.Get", args, reply)
+	retReply:=ck.RequestUntilSuccess("KVServer.Get", args, reply)
 
-	return reply.Value
+	return retReply.(*GetReply).Value
 }
 
 //
@@ -94,7 +96,8 @@ func (ck *Clerk) Append(key string, value string) {
 
 func (ck *Clerk) RequestUntilSuccess(
 	funcName string, args interface{}, reply interface{},
-) {
+) interface{}{
+
 	timeoutFunc := func(timeoutChan chan bool) {
 		time.Sleep(1 * time.Second)
 		timeoutChan <- true
@@ -102,16 +105,21 @@ func (ck *Clerk) RequestUntilSuccess(
 	remoteCallFunc := func(
 		remoteCallRetChan chan bool, args interface{}, reply interface{},
 	) {
-		ok := ck.servers[ck.leaderIndex].Call(funcName, args, reply)
+		ck.mu.Lock()
+		leaderIndex:=ck.leaderIndex
+		ck.mu.Unlock()
+		ok := ck.servers[leaderIndex].Call(funcName, args, reply)
 		remoteCallRetChan <- ok
 	}
 
+	var ret interface{}
 LOOP:
 	for true {
 		timeoutChan := make(chan bool, 1)
 		remoteCallRetChan := make(chan bool, 1)
+		newReply:=reply.(ReplyInterface).copy()
 		go timeoutFunc(timeoutChan)
-		go remoteCallFunc(remoteCallRetChan, args, reply)
+		go remoteCallFunc(remoteCallRetChan, args, newReply)
 
 		select {
 		case <-timeoutChan:
@@ -120,10 +128,14 @@ LOOP:
 			if !ok {
 				//;do not send to the same server, send the request to other server
 			}
-			if reply.(ReplyInterface).getErr() == OK {
+			if newReply.(ReplyInterface).getErr() == OK {
+				ret=newReply
 				break LOOP
 			}
 		}
+		ck.mu.Lock()
 		ck.leaderIndex = (ck.leaderIndex + 1) % len(ck.servers)
+		ck.mu.Unlock()
 	}
+	return ret
 }

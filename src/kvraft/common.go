@@ -44,6 +44,17 @@ func (r *PutAppendReply) getErr() Err{
 	return r.Err
 }
 
+func (r *GetReply) copy() interface{}{
+	newReply:=*r
+	return &newReply
+}
+
+func (r *PutAppendReply) copy() interface{}{
+	newReply:=*r
+	return &newReply
+}
+
 type ReplyInterface interface {
 	getErr() Err
+	copy() interface{}
 }

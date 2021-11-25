@@ -21,10 +21,9 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -144,7 +143,6 @@ type Raft struct {
 	leader         int
 	timeOut4Leader bool
 
-	commandChan []interface{}
 	nextIndex   []int
 	applyChan   chan ApplyMsg
 	commitIndex int
@@ -669,7 +667,6 @@ func (rf *Raft) appendEntryTicker() {
 		rf.mu.Lock()
 		//if the server is not the leader, stop append entry
 		if rf.leader != rf.me {
-			rf.commandChan = make([]interface{},0)
 			rf.mu.Unlock()
 			break
 		}
@@ -928,7 +925,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(os.Stdout, "[DEBUG] ", 0)
+		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
@@ -938,7 +935,6 @@ func Make(
 	rf.leader = -1
 
 	rf.nextIndex = make([]int, len(peers))
-	rf.commandChan = make([]interface{},0) //may cause block and dead lock
 	rf.applyChan = applyCh
 
 	rf.snapshotLastIndex = -1
