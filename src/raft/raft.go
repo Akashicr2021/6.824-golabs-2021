@@ -947,6 +947,7 @@ func Make(
 	go rf.ticker()
 
 	return rf
+
 }
 
 var appendEntryInterval =15
