@@ -153,6 +153,14 @@ type Raft struct {
 	snapshot          []byte
 }
 
+func (rf *Raft) RaftStateSize() int{
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetSnapshotLastIndex() int{
+	return rf.snapshotLastIndex
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -193,9 +201,10 @@ func (rf *Raft) persist() {
 
 	e.Encode(rf.snapshotLastIndex)
 	e.Encode(rf.snapshotLastTerm)
-	e.Encode(rf.snapshot)
+
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data,rf.snapshot)
+
 }
 
 //
@@ -226,13 +235,11 @@ func (rf *Raft) readPersist(data []byte) {
 
 	var snapshotLastIndex int
 	var snapshotLastTerm int
-	var snapshot []byte
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logEntries) != nil ||
 		d.Decode(&snapshotLastIndex) != nil ||
-		d.Decode(&snapshotLastTerm) != nil ||
-		d.Decode(&snapshot) != nil {
+		d.Decode(&snapshotLastTerm) != nil {
 		logger.Print("readPersist error")
 	} else {
 		rf.currentTerm = currentTerm
@@ -241,7 +248,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 		rf.snapshotLastIndex =snapshotLastIndex
 		rf.snapshotLastTerm=snapshotLastTerm
-		rf.snapshot=snapshot
+		rf.snapshot=rf.persister.ReadSnapshot()
 		//logger.Printf("node %d: recover from persist, log %v", rf.me, rf.logEntries)
 	}
 }
@@ -387,6 +394,15 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 	msgArray:=make([]ApplyMsg,0)
 	for i := rf.commitIndex + 1; i <= index; i++ {
 		if i <= rf.snapshotLastIndex {
+			//msg := ApplyMsg{
+			//	CommandValid:  false,
+			//	SnapshotValid: true,
+			//	Snapshot:      rf.snapshot,
+			//	SnapshotIndex: rf.snapshotLastIndex,
+			//	SnapshotTerm:  rf.snapshotLastTerm,
+			//}
+			//msgArray=append(msgArray,msg)
+			//i=rf.snapshotLastIndex
 			continue
 		}
 		msg := ApplyMsg{}

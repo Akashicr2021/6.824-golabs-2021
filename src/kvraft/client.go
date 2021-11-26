@@ -35,7 +35,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 //
-// fetch the current value for a key.
+// fetch the current Value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
