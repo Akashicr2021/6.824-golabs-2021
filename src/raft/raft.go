@@ -146,7 +146,8 @@ type Raft struct {
 	nextIndex   []int
 	applyChan   chan ApplyMsg
 	commitIndex int
-	commitMu sync.Mutex
+	applyMu sync.Mutex
+	applyIndex int
 
 	snapshotLastIndex int
 	snapshotLastTerm  int
@@ -346,6 +347,10 @@ func (rf *Raft) updataeSnapshot(index int, term int, snapshot []byte) {
 	rf.snapshotLastIndex = index
 	rf.snapshot = snapshot
 
+	if rf.commitIndex<index{
+		rf.commitIndex=index
+	}
+
 	rf.persist()
 }
 
@@ -394,42 +399,61 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 	msgArray:=make([]ApplyMsg,0)
 	for i := rf.commitIndex + 1; i <= index; i++ {
 		if i <= rf.snapshotLastIndex {
-			//msg := ApplyMsg{
-			//	CommandValid:  false,
-			//	SnapshotValid: true,
-			//	Snapshot:      rf.snapshot,
-			//	SnapshotIndex: rf.snapshotLastIndex,
-			//	SnapshotTerm:  rf.snapshotLastTerm,
-			//}
-			//msgArray=append(msgArray,msg)
-			//i=rf.snapshotLastIndex
+			msg := ApplyMsg{
+				CommandValid:  false,
+				SnapshotValid: true,
+				Snapshot:      rf.snapshot,
+				SnapshotIndex: rf.snapshotLastIndex,
+				SnapshotTerm:  rf.snapshotLastTerm,
+			}
+			msgArray=append(msgArray,msg)
+			i=rf.snapshotLastIndex
 			continue
 		}
 		msg := ApplyMsg{}
 		msg.Command = rf.getEntryCommand(i)
 		msg.CommandIndex = i
 		msg.CommandValid = true
+		msg.SnapshotValid=false
 		msgArray=append(msgArray,msg)
 		//logger.Printf("node %d: commit log %v", rf.me, msg.Command)
 	}
 
-	syncChan:=make(chan bool)
 	commitFunc:=func(){
 		//TODO: lock will cause dead lock, non-lock will cause disorder. some other mechanism required here
-		//rf.commitMu.Lock()
-		syncChan<-true
+		startIndex:=0
+		for true{
+			rf.applyMu.Lock()
+			startIndex=rf.applyIndex+1
+			for i:=0;i<len(msgArray);i++ {
+				if !msgArray[i].SnapshotValid{
+					startIndex=msgArray[i].CommandIndex
+					break
+				}
+			}
+			//to ensure the commit index is in order
+			if rf.applyIndex+1>=startIndex{
+				//obtain the lock and break
+				break
+			}
+			rf.applyMu.Unlock()
+			time.Sleep(5*time.Millisecond)
+		}
 		for i:=0;i<len(msgArray);i++{
 			rf.applyChan <- msgArray[i]
+			if !msgArray[i].SnapshotValid&&msgArray[i].CommandIndex>rf.applyIndex{
+				rf.applyIndex++
+			}
 		}
-		//rf.commitMu.Unlock()
+		rf.applyMu.Unlock()
 	}
 	//use goroutine to free the lock
 	go commitFunc()
-	<-syncChan
 
 	if rf.commitIndex < index {
 		rf.commitIndex = index
 	}
+
 }
 
 
@@ -573,6 +597,11 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 	//trunc the logs
 	if isDiff {
+		for args.PreLogIndex<rf.snapshotLastIndex{
+			args.PreLogIndex++
+			args.LogEntries=args.LogEntries[1:]
+		}
+
 		tmpEntries := rf.getEntries(rf.snapshotLastIndex+1, args.PreLogIndex+1)
 		//may have bug: the args.LogEntries may contain the entry before the lastIncluded Index
 		rf.logEntries = append(tmpEntries, args.LogEntries...)
@@ -629,7 +658,7 @@ func (rf *Raft) appendEntryReplyHandler(
 				//logger.Printf("node %d, leader commit to %d, current log is %v",rf.me,index,rf.logEntries)
 
 				//very important check, only commit the logs that contains the log with same term
-				if rf.getEntryTerm(index)==rf.currentTerm{
+				if index>=rf.snapshotLastIndex&&rf.getEntryTerm(index)==rf.currentTerm{
 					rf.commitEntriesUntilIndex(index)
 				}
 			}
