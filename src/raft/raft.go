@@ -21,9 +21,10 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -250,6 +251,11 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.snapshotLastIndex =snapshotLastIndex
 		rf.snapshotLastTerm=snapshotLastTerm
 		rf.snapshot=rf.persister.ReadSnapshot()
+
+		if rf.applyIndex<snapshotLastIndex{
+			rf.applyIndex=snapshotLastIndex
+		}
+
 		//logger.Printf("node %d: recover from persist, log %v", rf.me, rf.logEntries)
 	}
 }
@@ -316,12 +322,22 @@ func (rf *Raft) CondInstallSnapshot(
 
 	// Your code here (2D).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer rf.mu.Lock()
 	//old snapshot, reject
 	if lastIncludedIndex < rf.snapshotLastIndex {
 		return false
 	}
 	rf.updataeSnapshot(lastIncludedIndex, lastIncludedTerm, snapshot)
+
+	//TODO: the lock here will cause dead lock, why??
+	//go func(){
+		//rf.applyMu.Lock()
+		if rf.applyIndex<lastIncludedIndex{
+			rf.applyIndex=lastIncludedIndex
+		}
+		//rf.applyMu.Unlock()
+	//}()
+
 	return true
 }
 
@@ -420,11 +436,11 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 	}
 
 	commitFunc:=func(){
-		//TODO: lock will cause dead lock, non-lock will cause disorder. some other mechanism required here
+		//TODO: lock will cause dead lock, non-lock will cause disorder.
 		startIndex:=0
 		for true{
 			rf.applyMu.Lock()
-			startIndex=rf.applyIndex+1
+			startIndex=0
 			for i:=0;i<len(msgArray);i++ {
 				if !msgArray[i].SnapshotValid{
 					startIndex=msgArray[i].CommandIndex
@@ -443,6 +459,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 			rf.applyChan <- msgArray[i]
 			if !msgArray[i].SnapshotValid&&msgArray[i].CommandIndex>rf.applyIndex{
 				rf.applyIndex++
+				fmt.Printf("node %d apply %d  ",rf.me,rf.applyIndex)
 			}
 		}
 		rf.applyMu.Unlock()
@@ -452,6 +469,7 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 
 	if rf.commitIndex < index {
 		rf.commitIndex = index
+		//fmt.Printf("node %d: commitIndex %d",rf.me,rf.commitIndex)
 	}
 
 }
@@ -561,8 +579,8 @@ func (rf *Raft) checkAppendEntryArgs(
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
-	//logger.Printf("node %d: receive append entry from %d, term is %d",rf.me,args.Leader,rf.currentTerm)
 	rf.mu.Lock()
+	fmt.Printf("node %d: receive append entry from %d, term is %d\n",rf.me,args.Leader,rf.currentTerm)
 	defer rf.mu.Unlock()
 	if rf.checkRemoteTermAndUpdate(args.Term, args.Leader) < 0 {
 		reply.Term = rf.currentTerm
@@ -970,7 +988,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
+		logger = log.New(os.Stdout, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
