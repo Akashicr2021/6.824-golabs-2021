@@ -367,7 +367,5 @@ func StartKVServer(
 	//kv.receiveOldApplyMsgFromRaft()
 
 	go kv.execute(kv.applyCh)
-
-
 	return kv
 }

@@ -21,10 +21,9 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -322,7 +321,7 @@ func (rf *Raft) CondInstallSnapshot(
 
 	// Your code here (2D).
 	rf.mu.Lock()
-	defer rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//old snapshot, reject
 	if lastIncludedIndex < rf.snapshotLastIndex {
 		return false
@@ -330,13 +329,13 @@ func (rf *Raft) CondInstallSnapshot(
 	rf.updataeSnapshot(lastIncludedIndex, lastIncludedTerm, snapshot)
 
 	//TODO: the lock here will cause dead lock, why??
-	//go func(){
-		//rf.applyMu.Lock()
+	go func(){
+		rf.applyMu.Lock()
 		if rf.applyIndex<lastIncludedIndex{
 			rf.applyIndex=lastIncludedIndex
 		}
-		//rf.applyMu.Unlock()
-	//}()
+		rf.applyMu.Unlock()
+	}()
 
 	return true
 }
@@ -459,7 +458,6 @@ func (rf *Raft) commitEntriesUntilIndex(index int) {
 			rf.applyChan <- msgArray[i]
 			if !msgArray[i].SnapshotValid&&msgArray[i].CommandIndex>rf.applyIndex{
 				rf.applyIndex++
-				fmt.Printf("node %d apply %d  ",rf.me,rf.applyIndex)
 			}
 		}
 		rf.applyMu.Unlock()
@@ -580,7 +578,7 @@ func (rf *Raft) checkAppendEntryArgs(
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
-	fmt.Printf("node %d: receive append entry from %d, term is %d\n",rf.me,args.Leader,rf.currentTerm)
+	//fmt.Printf("node %d: receive append entry from %d, term is %d\n",rf.me,args.Leader,rf.currentTerm)
 	defer rf.mu.Unlock()
 	if rf.checkRemoteTermAndUpdate(args.Term, args.Leader) < 0 {
 		reply.Term = rf.currentTerm
@@ -988,7 +986,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	if logger == nil {
-		logger = log.New(os.Stdout, "[DEBUG] ", 0)
+		logger = log.New(ioutil.Discard, "[DEBUG] ", 0)
 	}
 
 	rf.currentTerm = 1
